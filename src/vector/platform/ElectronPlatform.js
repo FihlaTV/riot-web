@@ -3,6 +3,9 @@
 /*
 Copyright 2016 Aviral Dasgupta
 Copyright 2016 OpenMarket Ltd
+Copyright 2018 New Vector Ltd
+Copyright 2019 Michael Telatynski <7t3chguy@gmail.com>
+Copyright 2020 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,47 +21,34 @@ limitations under the License.
 */
 
 import VectorBasePlatform, {updateCheckStatusEnum} from './VectorBasePlatform';
-import dis from 'matrix-react-sdk/lib/dispatcher';
-import { _t } from 'matrix-react-sdk/lib/languageHandler';
-import Promise from 'bluebird';
-import {remote, ipcRenderer} from 'electron';
-import rageshake from '../rageshake';
+import BaseEventIndexManager from 'matrix-react-sdk/src/indexing/BaseEventIndexManager';
+import dis from 'matrix-react-sdk/src/dispatcher';
+import { _t } from 'matrix-react-sdk/src/languageHandler';
+import * as rageshake from 'matrix-react-sdk/src/rageshake/rageshake';
+import {MatrixClient} from "matrix-js-sdk";
+import Modal from "matrix-react-sdk/src/Modal";
+import InfoDialog from "matrix-react-sdk/src/components/views/dialogs/InfoDialog";
+import Spinner from "matrix-react-sdk/src/components/views/elements/Spinner";
+import React from "react";
 
-remote.autoUpdater.on('update-downloaded', onUpdateDownloaded);
-
-// try to flush the rageshake logs to indexeddb before quit.
-ipcRenderer.on('before-quit', function () {
-    console.log('riot-desktop closing');
-    rageshake.flush();
-});
-
-function onUpdateDownloaded(ev: Event, releaseNotes: string, ver: string, date: Date, updateURL: string) {
-    dis.dispatch({
-        action: 'new_version',
-        currentVersion: remote.app.getVersion(),
-        newVersion: ver,
-        releaseNotes: releaseNotes,
-    });
-}
+const ipcRenderer = window.ipcRenderer;
 
 function platformFriendlyName(): string {
-    console.log(window.process);
-    switch (window.process.platform) {
-        case 'darwin':
-            return 'macOS';
-        case 'freebsd':
-            return 'FreeBSD';
-        case 'openbsd':
-            return 'OpenBSD';
-        case 'sunos':
-            return 'SunOS';
-        case 'win32':
-            return 'Windows';
-        default:
-            // Sorry, Linux users: you get lumped into here,
-            // but only because Linux's capitalisation is
-            // normal. We do care about you.
-            return window.process.platform[0].toUpperCase() + window.process.platform.slice(1);
+    // used to use window.process but the same info is available here
+    if (navigator.userAgent.includes('Macintosh')) {
+        return 'macOS';
+    } else if (navigator.userAgent.includes('FreeBSD')) {
+        return 'FreeBSD';
+    } else if (navigator.userAgent.includes('OpenBSD')) {
+        return 'OpenBSD';
+    } else if (navigator.userAgent.includes('SunOS')) {
+        return 'SunOS';
+    } else if (navigator.userAgent.includes('Windows')) {
+        return 'Windows';
+    } else if (navigator.userAgent.includes('Linux')) {
+        return 'Linux';
+    } else {
+        return 'Unknown';
     }
 }
 
@@ -82,12 +72,114 @@ function getUpdateCheckStatus(status) {
     }
 }
 
+class SeshatIndexManager extends BaseEventIndexManager {
+    constructor() {
+        super();
+
+        this._pendingIpcCalls = {};
+        this._nextIpcCallId = 0;
+        ipcRenderer.on('seshatReply', this._onIpcReply.bind(this));
+    }
+
+    async _ipcCall(name: string, ...args: []): Promise<{}> {
+        // TODO this should be moved into the preload.js file.
+        const ipcCallId = ++this._nextIpcCallId;
+        return new Promise((resolve, reject) => {
+            this._pendingIpcCalls[ipcCallId] = {resolve, reject};
+            window.ipcRenderer.send('seshat', {id: ipcCallId, name, args});
+        });
+    }
+
+    _onIpcReply(ev: {}, payload: {}) {
+        if (payload.id === undefined) {
+            console.warn("Ignoring IPC reply with no ID");
+            return;
+        }
+
+        if (this._pendingIpcCalls[payload.id] === undefined) {
+            console.warn("Unknown IPC payload ID: " + payload.id);
+            return;
+        }
+
+        const callbacks = this._pendingIpcCalls[payload.id];
+        delete this._pendingIpcCalls[payload.id];
+        if (payload.error) {
+            callbacks.reject(payload.error);
+        } else {
+            callbacks.resolve(payload.reply);
+        }
+    }
+
+    async supportsEventIndexing(): Promise<boolean> {
+        return this._ipcCall('supportsEventIndexing');
+    }
+
+    async initEventIndex(): Promise<> {
+        return this._ipcCall('initEventIndex');
+    }
+
+    async addEventToIndex(ev: MatrixEvent, profile: MatrixProfile): Promise<> {
+        return this._ipcCall('addEventToIndex', ev, profile);
+    }
+
+    async isEventIndexEmpty(): Promise<boolean> {
+        return this._ipcCall('isEventIndexEmpty');
+    }
+
+    async commitLiveEvents(): Promise<> {
+        return this._ipcCall('commitLiveEvents');
+    }
+
+    async searchEventIndex(searchConfig: SearchConfig): Promise<SearchResult> {
+        return this._ipcCall('searchEventIndex', searchConfig);
+    }
+
+    async addHistoricEvents(
+        events: [HistoricEvent],
+        checkpoint: CrawlerCheckpoint | null,
+        oldCheckpoint: CrawlerCheckpoint | null,
+    ): Promise<> {
+        return this._ipcCall('addHistoricEvents', events, checkpoint, oldCheckpoint);
+    }
+
+    async addCrawlerCheckpoint(checkpoint: CrawlerCheckpoint): Promise<> {
+        return this._ipcCall('addCrawlerCheckpoint', checkpoint);
+    }
+
+    async removeCrawlerCheckpoint(checkpoint: CrawlerCheckpoint): Promise<> {
+        return this._ipcCall('removeCrawlerCheckpoint', checkpoint);
+    }
+
+    async loadFileEvents(args): Promise<[EventAndProfile]> {
+        return this._ipcCall('loadFileEvents', args);
+    }
+
+    async loadCheckpoints(): Promise<[CrawlerCheckpoint]> {
+        return this._ipcCall('loadCheckpoints');
+    }
+
+    async closeEventIndex(): Promise<> {
+        return this._ipcCall('closeEventIndex');
+    }
+
+    async getStats(): Promise<> {
+        return this._ipcCall('getStats');
+    }
+
+    async deleteEventIndex(): Promise<> {
+        return this._ipcCall('deleteEventIndex');
+    }
+}
+
 export default class ElectronPlatform extends VectorBasePlatform {
     constructor() {
         super();
-        dis.register(_onAction);
-        this.updatable = Boolean(remote.autoUpdater.getFeedURL());
 
+        this._pendingIpcCalls = {};
+        this._nextIpcCallId = 0;
+        this.eventIndexManager = new SeshatIndexManager();
+
+        dis.register(_onAction);
         /*
             IPC Call `check_updates` returns:
             true if there is an update available
@@ -103,8 +195,30 @@ export default class ElectronPlatform extends VectorBasePlatform {
             this.showUpdateCheck = false;
         });
 
+        // try to flush the rageshake logs to indexeddb before quit.
+        ipcRenderer.on('before-quit', function() {
+            console.log('riot-desktop closing');
+            rageshake.flush();
+        });
+
+        ipcRenderer.on('ipcReply', this._onIpcReply.bind(this));
+        ipcRenderer.on('update-downloaded', this.onUpdateDownloaded.bind(this));
+
         this.startUpdateCheck = this.startUpdateCheck.bind(this);
         this.stopUpdateCheck = this.stopUpdateCheck.bind(this);
+    }
+
+    async getConfig(): Promise<{}> {
+        return this._ipcCall('getConfig');
+    }
+
+    async onUpdateDownloaded(ev, updateInfo) {
+        dis.dispatch({
+            action: 'new_version',
+            currentVersion: await this.getAppVersion(),
+            newVersion: updateInfo,
+            releaseNotes: updateInfo.releaseNotes,
+        });
     }
 
     getHumanReadableName(): string {
@@ -133,32 +247,25 @@ export default class ElectronPlatform extends VectorBasePlatform {
         // maybe we should pass basic styling (italics, bold, underline) through from MD
         // we only have to strip out < and > as the spec doesn't include anything about things like &amp;
         // so we shouldn't assume that all implementations will treat those properly. Very basic tag parsing is done.
-        if (window.process.platform === 'linux') {
+        if (navigator.userAgent.includes('Linux')) {
             msg = msg.replace(/</g, '&lt;').replace(/>/g, '&gt;');
         }
 
         // Notifications in Electron use the HTML5 notification API
-        const notification = new global.Notification(
-            title,
-            {
-                body: msg,
-                icon: avatarUrl,
-                tag: 'vector',
-                silent: true, // we play our own sounds
-            },
-        );
+        const notifBody = {
+            body: msg,
+            silent: true, // we play our own sounds
+        };
+        if (avatarUrl) notifBody['icon'] = avatarUrl;
+        const notification = new global.Notification(title, notifBody);
 
-        notification.onclick = function() {
+        notification.onclick = () => {
             dis.dispatch({
                 action: 'view_room',
                 room_id: room.roomId,
             });
             global.focus();
-            const win = remote.getCurrentWindow();
-
-            if (win.isMinimized()) win.restore();
-            else if (!win.isVisible()) win.show();
-            else win.focus();
+            this._ipcCall('focusWindow');
         };
 
         return notification;
@@ -172,8 +279,51 @@ export default class ElectronPlatform extends VectorBasePlatform {
         notif.close();
     }
 
-    getAppVersion(): Promise<string> {
-        return Promise.resolve(remote.app.getVersion());
+    async getAppVersion(): Promise<string> {
+        return this._ipcCall('getAppVersion');
+    }
+
+    supportsAutoLaunch(): boolean {
+        return true;
+    }
+
+    async getAutoLaunchEnabled(): boolean {
+        return this._ipcCall('getAutoLaunchEnabled');
+    }
+
+    async setAutoLaunchEnabled(enabled: boolean): void {
+        return this._ipcCall('setAutoLaunchEnabled', enabled);
+    }
+
+    supportsAutoHideMenuBar(): boolean {
+        // This is irelevant on Mac as Menu bars don't live in the app window
+        return !navigator.platform.toUpperCase().includes('MAC');
+    }
+
+    async getAutoHideMenuBarEnabled(): boolean {
+        return this._ipcCall('getAutoHideMenuBarEnabled');
+    }
+
+    async setAutoHideMenuBarEnabled(enabled: boolean): void {
+        return this._ipcCall('setAutoHideMenuBarEnabled', enabled);
+    }
+
+    supportsMinimizeToTray(): boolean {
+        // Things other than Mac support tray icons
+        return !navigator.platform.toUpperCase().includes('MAC');
+    }
+
+    async getMinimizeToTrayEnabled(): boolean {
+        return this._ipcCall('getMinimizeToTrayEnabled');
+    }
+
+    async setMinimizeToTrayEnabled(enabled: boolean): void {
+        return this._ipcCall('setMinimizeToTrayEnabled', enabled);
+    }
+
+    async canSelfUpdate(): boolean {
+        const feedUrl = await this._ipcCall('getUpdateFeedUrl');
+        return Boolean(feedUrl);
     }
 
     startUpdateCheck() {
@@ -198,13 +348,68 @@ export default class ElectronPlatform extends VectorBasePlatform {
         return null;
     }
 
-    isElectron(): boolean { return true; }
-
     requestNotificationPermission(): Promise<string> {
         return Promise.resolve('granted');
     }
 
     reload() {
-        remote.getCurrentWebContents().reload();
+        // we used to remote to the main process to get it to
+        // reload the webcontents, but in practice this is unnecessary:
+        // the normal way works fine.
+        window.location.reload(false);
+    }
+
+    async _ipcCall(name, ...args) {
+        const ipcCallId = ++this._nextIpcCallId;
+        return new Promise((resolve, reject) => {
+            this._pendingIpcCalls[ipcCallId] = {resolve, reject};
+            window.ipcRenderer.send('ipcCall', {id: ipcCallId, name, args});
+            // Maybe add a timeout to these? Probably not necessary.
+        });
+    }
+
+    _onIpcReply(ev, payload) {
+        if (payload.id === undefined) {
+            console.warn("Ignoring IPC reply with no ID");
+            return;
+        }
+
+        if (this._pendingIpcCalls[payload.id] === undefined) {
+            console.warn("Unknown IPC payload ID: " + payload.id);
+            return;
+        }
+
+        const callbacks = this._pendingIpcCalls[payload.id];
+        delete this._pendingIpcCalls[payload.id];
+        if (payload.error) {
+            callbacks.reject(payload.error);
+        } else {
+            callbacks.resolve(payload.reply);
+        }
+    }
+
+    getEventIndexingManager(): BaseEventIndexManager | null {
+        return this.eventIndexManager;
+    }
+
+    setLanguage(preferredLangs: string[]) {
+        this._ipcCall('setLanguage', preferredLangs).catch(error => {
+            console.log("Failed to send setLanguage IPC to Electron");
+            console.error(error);
+        });
+    }
+
+    getSSOCallbackUrl(hsUrl: string, isUrl: string): URL {
+        const url = super.getSSOCallbackUrl(hsUrl, isUrl);
+        url.protocol = "riot";
+        return url;
+    }
+
+    startSingleSignOn(mxClient: MatrixClient, loginType: "sso" | "cas") {
+        super.startSingleSignOn(mxClient, loginType); // this will get intercepted by electron-main will-navigate
+        Modal.createTrackedDialog('Electron', 'SSO', InfoDialog, {
+            title: _t("Go to your browser to complete Sign In"),
+            description: <Spinner />,
+        });
     }
 }

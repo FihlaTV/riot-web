@@ -1,3 +1,5 @@
+<!-- Please report security issues by email to security@matrix.org -->
+
 <!-- This is a bug report template. By following the instructions below and
 filling out the sections with your information, you will help the us to get all
 the necessary data to fix your issue.
@@ -41,4 +43,4 @@ For the web app:
 For the desktop app:
 
 - **OS**: Windows, macOS, Ubuntu, Arch Linux, etc?
-- **Version**: 0.x.y <!-- check the user settings panel if unsure -->
+- **Version**: 1.x.y <!-- check the user settings panel if unsure -->
